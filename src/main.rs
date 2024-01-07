@@ -1,7 +1,7 @@
 use bevy::{input::mouse::MouseMotion, prelude::*, window::PresentMode};
 
 use bevy_mod_picking::{
-    prelude::{Click, ListenerInput, On, Out, Over, Pointer},
+    prelude::{Click, ListenerInput, On, Out, Over, Pointer, PointerButton},
     DefaultPickingPlugins,
 };
 
@@ -10,7 +10,10 @@ use serde_json::json;
 
 use cryptoxide::digest::Digest;
 use cryptoxide::sha2::Sha256;
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::{Display, Formatter},
+};
 
 use nostro2::{
     notes::SignedNote,
@@ -23,7 +26,7 @@ use crossbeam_channel::{bounded, Receiver};
 const WINDOW_WIDTH: f32 = 1280.0;
 const WINDOW_HEIGHT: f32 = 720.0;
 
-// Main function loop, runs once on startup 
+// Main function loop, runs once on startup
 fn main() {
     App::new()
         .add_plugins((
@@ -49,7 +52,7 @@ fn main() {
         // Events work as a way to pass data between systems
         .add_event::<NostrBevyEvents>()
         .add_event::<NoteBevyEvents>()
-        .add_event::<DespawnAvatar>()
+        .add_event::<ClickedEntity>()
         // Systems are functions that run every frame
         .add_systems(Startup, (setup, cyberspace_websocket))
         .add_systems(
@@ -58,15 +61,15 @@ fn main() {
                 camera_movement_system,
                 cyberspace_middleware,
                 rendering_entity_system,
-                make_notes_children_of_avatar,
-                despawn_avatar_system.run_if(on_event::<DespawnAvatar>()),
+                make_notes_children_of_avatar.run_if(on_event::<NostrBevyEvents>()),
+                handle_clicks_on_entities.run_if(on_event::<ClickedEntity>()),
                 rotate_cyberspace_entities,
             ),
         )
         .run();
 }
 
-// We start the camera at a fixed position 
+// We start the camera at a fixed position
 // far away to get a good view of the scene
 fn setup(mut commands: Commands) {
     commands
@@ -78,7 +81,7 @@ fn setup(mut commands: Commands) {
         .insert(CameraState::default());
 }
 
-#[derive(Component, Resource, Copy, Clone)]
+#[derive(Component, Copy, Clone)]
 struct CameraState {
     pub is_active: bool,
     pub speed: f32,
@@ -102,12 +105,10 @@ fn camera_movement_system(
     keyboard_input: Res<Input<KeyCode>>,
     mouse_input: Res<Input<MouseButton>>,
     mut mouse_motion_events: EventReader<MouseMotion>,
-    mut camera_state: Query<&mut CameraState, With<CameraState>>,
-    mut query: Query<&mut Transform, With<CameraState>>,
+    mut camera_state: Query<(&mut CameraState, &mut Transform)>,
 ) {
     let sensitivity = 0.42;
-    let mut camera_transform = query.single_mut();
-    let mut camera_state = camera_state.single_mut();
+    let (mut camera_state, mut camera_transform) = camera_state.single_mut();
 
     if mouse_input.pressed(MouseButton::Right) {
         if camera_state.is_active {
@@ -166,7 +167,7 @@ fn camera_movement_system(
 }
 
 // Will rotate Avatars every frame
-// Because Notes are children of Avatrs, they will rotate as well 
+// Because Notes are children of Avatrs, they will rotate as well
 fn rotate_cyberspace_entities(
     time: Res<Time>,
     mut query: Query<&mut Transform, With<CyberspaceMarker>>,
@@ -190,22 +191,22 @@ struct NostrReceiver(Receiver<String>);
 #[derive(Resource, Deref)]
 struct NoteReceiver(Receiver<CyberspaceNote>);
 
-const RELAY_LIST: [&str; 5] = [
+const RELAY_LIST: [&str; 10] = [
     "wss://relay.arrakis.lat",
-//    "wss://nostr.wine",
+    "wss://nostr.wine",
     "wss://njump.me",
     "wss://nostr-pub.wellorder.net",
-//    "wss://purplerelay.com",
-//    "wss://relay.n057r.club",
+    "wss://purplerelay.com",
+    "wss://relay.n057r.club",
     "wss://nostr.maximacitadel.org",
-//    "wss://relay.geekiam.services",
-//    "wss://nostr.jcloud.es",
+    "wss://relay.geekiam.services",
+    "wss://nostr.jc.es",
     "wss://relay.hodl.ar",
 ];
 
 fn cyberspace_websocket(mut commands: Commands, mut task_pool: AsyncTaskPool<()>) {
-    let (relay_tx, relay_rx) = bounded::<String>(10);
-    let (note_tx, note_rx) = bounded::<CyberspaceNote>(50);
+    let (relay_tx, relay_rx) = bounded::<String>(100);
+    let (note_tx, note_rx) = bounded::<CyberspaceNote>(500);
 
     if task_pool.is_idle() {
         for relay_url in RELAY_LIST.iter() {
@@ -214,9 +215,12 @@ fn cyberspace_websocket(mut commands: Commands, mut task_pool: AsyncTaskPool<()>
             task_pool.spawn(async move {
                 if let Ok(relay) = NostrRelay::new(relay_url).await {
                     // let one_week_ago = nostro2::utils::get_unix_timestamp() - 604800;
-                    let yesterday = nostro2::utils::get_unix_timestamp() - 86400;
-                    let filter = json!({"kinds": [1], "since": yesterday});
+                    // let yesterday = nostro2::utils::get_unix_timestamp() - 86400;
+                    let last_hour = nostro2::utils::get_unix_timestamp() - 3600;
+                    let filter = json!({"kinds": [1, 7], "since": last_hour});
+                    // let metadata_filter = json!({"kinds": [7], "since": last_2_hours});
                     let _ = relay.subscribe(filter).await;
+                    // let _ = relay.subscribe(metadata_filter).await;
                     while let Some(Ok(msg)) = relay.read_from_relay().await {
                         match msg {
                             RelayEvents::EVENT(_, _, signed_note) => {
@@ -224,14 +228,17 @@ fn cyberspace_websocket(mut commands: Commands, mut task_pool: AsyncTaskPool<()>
                                 let _ = note_tx.send(note);
                             }
                             RelayEvents::EOSE(_, _) => {
-                                info!("End of stream from relay: {}", relay_url.to_string());
-                                relay_tx.send(relay_url.to_string()).unwrap();
+                                if let Ok(_) = relay_tx.send(relay_url.to_string()){
+                                    info!("End of stream from relay: {}", relay_url.to_string());
+                                }
+                                
                             }
                             _ => {}
                         }
                     }
                 } else {
                     info!("Failed to connect to relay: {}", relay_url.to_string());
+                    let _ = relay_tx.send(relay_url.to_string());
                 }
             });
         }
@@ -253,6 +260,7 @@ impl Default for UniqueNotes {
 fn cyberspace_middleware(
     nostr_receiver: Res<NostrReceiver>,
     note_receiver: Res<NoteReceiver>,
+    mut counter: ResMut<RelayCounter>,
     mut nostr_writer: EventWriter<NostrBevyEvents>,
     mut note_writer: EventWriter<NoteBevyEvents>,
     mut unique_notes: ResMut<UniqueNotes>,
@@ -260,6 +268,8 @@ fn cyberspace_middleware(
     let note_set = unique_notes.as_mut();
 
     nostr_receiver.try_iter().for_each(|relay_url| {
+        counter.0 += 1;
+        info!("Connection to relay was: {}", relay_url);
         nostr_writer.send(NostrBevyEvents(relay_url));
     });
 
@@ -291,20 +301,31 @@ fn rendering_entity_system(
 ) {
     let avatar_set = unique_avatars.as_mut();
 
-    for cyber_event in note_events.read() {
-        if !avatar_set.0.contains(&cyber_event.0.pubkey) {
-            avatar_set.0.insert(cyber_event.0.pubkey.clone());
+    for cyber_note in note_events.read() {
+        if !avatar_set.0.contains(&cyber_note.0.pubkey) {
+            avatar_set.0.insert(cyber_note.0.pubkey.clone());
             commands.spawn(AvatarBundle::new(
-                cyber_event.0.pubkey.clone(),
+                &cyber_note.0,
                 &mut materials,
                 &mut meshes,
             ));
         }
-        commands.spawn(NoteBundle::new(
-            cyber_event.0.clone(),
-            &mut materials,
-            &mut meshes,
-        ));
+
+        match cyber_note.0.kind {
+            1 => {
+                commands.spawn((
+                    NoteBundle::new(&cyber_note.0, &mut materials, &mut meshes),
+                    Kind1Note(cyber_note.0.clone()),
+                ));
+            }
+            7 => {
+                commands.spawn((
+                    NoteBundle::new(&cyber_note.0, &mut materials, &mut meshes),
+                    Kind7Note(cyber_note.0.clone()),
+                ));
+            }
+            _ => {}
+        }
     }
 }
 
@@ -313,45 +334,76 @@ struct RelayCounter(usize);
 
 fn make_notes_children_of_avatar(
     mut commands: Commands,
-    mut nostr_events: EventReader<NostrBevyEvents>,
-    note_query: Query<(Entity, &Kind1Note, &Transform)>,
+    note_query: Query<(Entity, &NotePubkey, &Transform)>,
     avatar_query: Query<(Entity, &AvatarPubkey, &Transform)>,
-    mut counter: ResMut<RelayCounter>,
+    counter: ResMut<RelayCounter>,
 ) {
-    let counter = counter.as_mut();
-    for _ in nostr_events.read() {
-        counter.0 += 1;
+    info!("Counter: {}", counter.0);
+    if counter.0 < RELAY_LIST.len() {
+        return;
     }
 
-    if counter.0 == RELAY_LIST.len() {
-        info!("Making notes children of avatars");
-        counter.0 = 0;
-        for (avatar_entity, avatar_pubkey, avatar_transform) in avatar_query.iter() {
-            for (note_entity, _note, note_transform) in note_query
-                .iter()
-                .filter(|(_, note, _)| note.pubkey == avatar_pubkey.0)
-            {
-                // Calculate the relative position of the note to the avatar
-                let relative_position = note_transform.translation - avatar_transform.translation;
+    info!("Now");
 
-                // Set the note's new transform to this relative position
-                let relative_transform = Transform::from_translation(relative_position);
+    for (avatar_entity, avatar_pubkey, avatar_transform) in avatar_query.iter() {
+        for (note_entity, _note, note_transform) in note_query
+            .iter()
+            .filter(|(_, note, _)| note.0 == avatar_pubkey.0)
+        {
+            // Calculate the relative position of the note to the avatar
+            let relative_position = note_transform.translation - avatar_transform.translation;
 
-                // Attach the note as a child of the avatar
-                commands.entity(avatar_entity).add_child(note_entity);
+            // Set the note's new transform to this relative position
+            let relative_transform = Transform::from_translation(relative_position);
 
-                // Apply the relative transform
-                commands.entity(note_entity).insert(relative_transform);
-            }
+            // Attach the note as a child of the avatar
+            commands.entity(avatar_entity).add_child(note_entity);
+
+            // Apply the relative transform
+            commands.entity(note_entity).insert(relative_transform);
         }
     }
 }
 
 #[derive(Component)]
-struct CyberspaceMarker;
+struct CyberspaceMarker {
+    pub is_active: bool,
+}
+
+impl CyberspaceMarker {
+    pub fn switch(&mut self) {
+        self.is_active = !self.is_active;
+    }
+}
+impl Default for CyberspaceMarker {
+    fn default() -> Self {
+        CyberspaceMarker { is_active: false }
+    }
+}
 
 #[derive(Component)]
 struct AvatarPubkey(String);
+
+#[derive(Component)]
+struct NotePubkey(String);
+
+use serde::{Deserialize, Serialize};
+#[derive(Component, Serialize, Deserialize, Debug)]
+struct AvatarMetadata {
+    name: String,
+    about: String,
+    picture: String,
+}
+
+impl Default for AvatarMetadata {
+    fn default() -> Self {
+        AvatarMetadata {
+            name: "".to_string(),
+            about: "".to_string(),
+            picture: "".to_string(),
+        }
+    }
+}
 
 #[derive(Bundle)]
 struct AvatarBundle {
@@ -363,11 +415,11 @@ struct AvatarBundle {
 
 impl AvatarBundle {
     pub fn new(
-        pubkey: String,
+        cyber_note: &CyberspaceNote,
         materials: &mut ResMut<Assets<StandardMaterial>>,
         meshes: &mut ResMut<Assets<Mesh>>,
     ) -> AvatarBundle {
-        let simhash = simhash(&pubkey);
+        let simhash = simhash(&cyber_note.pubkey);
         let (x, y, z) = map_hash_to_coordinates(simhash);
         let (x_f32, y_f32, z_f32) = scale_down_coordinates_to_f32(x, y, z);
 
@@ -383,14 +435,14 @@ impl AvatarBundle {
                 ),
                 // add birght blue material
                 material: materials.add(StandardMaterial {
-                    base_color: Color::rgba(0.0, 0.24, 0.48, 0.0),
+                    base_color: Color::rgba(1.0, 0.87451, 0.0, 1.0),
                     unlit: true,
                     ..default()
                 }),
                 transform: Transform::from_xyz(x_f32, y_f32, z_f32),
                 ..Default::default()
             },
-            pubkey: AvatarPubkey(pubkey),
+            pubkey: AvatarPubkey(cyber_note.pubkey.clone()),
             ..Default::default()
         }
     }
@@ -403,54 +455,81 @@ impl Default for AvatarBundle {
                 ..Default::default()
             },
             pubkey: AvatarPubkey("".to_string()),
-            marker: CyberspaceMarker,
+            marker: CyberspaceMarker::default(),
             pickable: (
-                On::<Pointer<Over>>::target_component_mut::<Transform>(|_over, transform| {
-                    transform.scale = Vec3::splat(2.1);
-                }),
-                On::<Pointer<Out>>::target_component_mut::<Transform>(|_out, transform| {
-                    transform.scale = Vec3::splat(1.0);
-                }),
-                On::<Pointer<Click>>::send_event::<DespawnAvatar>(),
+                On::<Pointer<Over>>::target_component_mut::<Transform>(|_over, transform| {}),
+                On::<Pointer<Out>>::target_component_mut::<Transform>(|_out, transform| {}),
+                On::<Pointer<Click>>::send_event::<ClickedEntity>(),
             ),
         }
     }
 }
 
 #[derive(Event)]
-struct DespawnAvatar(Entity);
+struct ClickedEntity(Entity, Click);
 
-impl From<ListenerInput<Pointer<Click>>> for DespawnAvatar {
+impl From<ListenerInput<Pointer<Click>>> for ClickedEntity {
     fn from(event: ListenerInput<Pointer<Click>>) -> Self {
-        DespawnAvatar(event.target)
+        ClickedEntity(event.target, event.event.clone())
     }
 }
 
-fn despawn_avatar_system(
-    mut commands: Commands,
-    mut events: EventReader<DespawnAvatar>,
-    query: Query<&AvatarPubkey>,
+fn handle_clicks_on_entities(
+    mut events: EventReader<ClickedEntity>,
+    mut query: Query<(
+        Entity,
+        &mut CyberspaceMarker,
+        &mut Transform,
+        Option<&AvatarPubkey>,
+        Option<&Kind1Note>,
+    )>,
 ) {
     for event in events.read() {
-        if let Ok(avatar_pubkey) = query.get(event.0) {
-            info!("Avatar pubkey: {}", avatar_pubkey.0);
-            commands.entity(event.0).despawn_recursive();
+        if let Ok((entity, mut marker, mut transform, avatar_pubkey, note)) = query.get_mut(event.0)
+        {
+            match event.1.button {
+                PointerButton::Secondary => {
+                    if note.is_some() {
+                        transform.scale = if marker.is_active {
+                            Vec3::splat(1.0)
+                        } else {
+                            Vec3::splat(2.1)
+                        };
+                        marker.switch();
+                    }
+                    if avatar_pubkey.is_some() {
+                        transform.scale = if marker.is_active {
+                            Vec3::splat(1.0)
+                        } else {
+                            Vec3::splat(4.2)
+                        };
+                        marker.switch();
+                    }
+                }
+                PointerButton::Primary => {
+                    if let Some(avatar) = avatar_pubkey {
+                        info!("Avatar pubkey: {}", avatar.0);
+                    } else if let Some(note) = note {
+                        info!("Note says: {}", note.0);
+                    }
+                }
+                _ => {}
+            }
         }
     }
 }
 
-#[derive(Component)]
-struct Kind1Note {
-    pub content: String,
-    pub pubkey: String,
-}
+#[derive(Component, Debug)]
+struct Kind1Note(CyberspaceNote);
+
+#[derive(Component, Debug)]
+struct Kind7Note(CyberspaceNote);
 
 #[derive(Bundle)]
 struct NoteBundle {
     pub pbr: PbrBundle,
-    pub note: Kind1Note,
+    pub note_pubkey: NotePubkey,
     pub marker: CyberspaceMarker,
-    pub pickable: (On<Pointer<Over>>, On<Pointer<Out>>, On<Pointer<Click>>),
 }
 
 impl Default for NoteBundle {
@@ -459,96 +538,112 @@ impl Default for NoteBundle {
             pbr: PbrBundle {
                 ..Default::default()
             },
-            note: Kind1Note {
-                content: "".to_string(),
-                pubkey: "".to_string(),
-            },
-            marker: CyberspaceMarker,
-            pickable: (
-                On::<Pointer<Over>>::target_component_mut::<Transform>(|_over, transform| {
-                    transform.scale = Vec3::splat(1.6);
-                }),
-                On::<Pointer<Out>>::target_component_mut::<Transform>(|_out, transform| {
-                    transform.scale = Vec3::splat(1.0);
-                }),
-                On::<Pointer<Click>>::target_component_mut::<Kind1Note>(|_click, note| {
-                    info!("Note says: {}", note.content);
-                }),
-            ),
+            note_pubkey: NotePubkey("".to_string()),
+            marker: CyberspaceMarker::default(),
         }
     }
 }
 
 impl NoteBundle {
     pub fn new(
-        note: CyberspaceNote,
+        note: &CyberspaceNote,
         materials: &mut ResMut<Assets<StandardMaterial>>,
         meshes: &mut ResMut<Assets<Mesh>>,
     ) -> NoteBundle {
-        let hash = simhash(&note.content);
-        let origin_hash = simhash(&note.pubkey);
-        let (x, y, z) = map_hash_to_coordinates_with_offset(hash, origin_hash);
+        let hash: U256;
+        let origin_hash: U256;
+        let (x, y, z);
+        let color;
+        let radius;
 
+        match note.kind {
+            1 => {
+                hash = simhash(&note.content);
+                origin_hash = simhash(&note.pubkey);
+                (x, y, z) = map_hash_to_coordinates_with_offset(hash, origin_hash);
+                color = Color::rgba(0.0, 1.0, 0.58824, 1.0);
+                radius = 2.1;
+            }
+            7 => {
+                let concat_str = format!("{} {} {}", note.content, note.created_at, note.id);
+                hash = simhash(&concat_str);
+                origin_hash = simhash(&note.pubkey);
+                (x, y, z) = map_hash_to_coordinates_with_offset(hash, origin_hash);
+                color = Color::rgba(1.0, 0.41176, 0.70588, 1.0);
+                radius = 1.05;
+            }
+            _ => {
+                (x, y, z) = (0.0, 0.0, 0.0);
+                color = Color::rgba(1.0, 1.0, 1.0, 1.0);
+                radius = 0.0;
+            }
+        }
         NoteBundle {
             pbr: PbrBundle {
                 mesh: meshes.add(
                     Mesh::try_from(shape::Icosphere {
-                        radius: 2.1,
+                        radius,
                         subdivisions: 4,
                         ..Default::default()
                     })
                     .unwrap(),
                 ),
                 material: materials.add(StandardMaterial {
-                    base_color: Color::rgba(0.0, 0.48, 0.24, 0.3),
+                    base_color: color,
                     unlit: true,
                     ..default()
                 }),
                 transform: Transform::from_xyz(x, y, z),
                 ..Default::default()
             },
-            note: Kind1Note {
-                content: note.content,
-                pubkey: note.pubkey,
-            },
+            note_pubkey: NotePubkey(note.pubkey.clone()),
             ..Default::default()
         }
     }
 }
 
-#[derive(Event, Clone)]
+#[derive(Event, Debug, Clone)]
 struct CyberspaceNote {
     content: String,
-    _kind: u32,
+    kind: u32,
     id: String,
     _signature: String,
-    _created_at: u64,
+    created_at: u64,
     pubkey: String,
 }
 
 impl CyberspaceNote {
     pub fn new(signed_note: SignedNote) -> CyberspaceNote {
         let content = signed_note.get_content().to_string();
-        let _kind = signed_note.get_kind();
+        let kind = signed_note.get_kind();
         let id = signed_note.get_id().to_string();
         let _signature = signed_note.get_sig().to_string();
-        let _created_at = signed_note.get_created_at();
+        let created_at = signed_note.get_created_at();
         let pubkey = signed_note.get_pubkey().to_string();
         CyberspaceNote {
             content,
-            _kind,
+            kind,
             id,
             _signature,
-            _created_at,
+            created_at,
             pubkey,
         }
     }
 }
 
+impl Display for CyberspaceNote {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "\n content: {},\nkind: {}, created_at: {},\npubkey: {},\nid: {}..,\nsignature: {:24}... \n",
+            self.content, self.kind, self.created_at, self.pubkey, self.id, self._signature
+        )
+    }
+}
 
 // CYBERSPACE METHODS
-// These methods are used to generate the cyberspace coordinates for the notes and avatars 
-// based on their content and public key respectively 
+// These methods are used to generate the cyberspace coordinates for the notes and avatars
+// based on their content and public key respectively
 
 // Simhash is a hashing algorithm that is used to generate a 256 bit hash from a string
 fn simhash(input: &str) -> U256 {
@@ -626,7 +721,7 @@ fn map_hash_to_coordinates(hash: U256) -> (U256, U256, U256) {
     (x, y, z)
 }
 
-// U256 type comes from the primitive_types crate 
+// U256 type comes from the primitive_types crate
 // It's a 256 bit unsigned integer
 fn get_bit_as_u256(hash: &U256, index: usize) -> U256 {
     if get_bit_from_primitive(hash, index) {
@@ -643,7 +738,7 @@ fn get_bit_from_primitive(hash: &U256, index: usize) -> bool {
     (byte & (1 << bit_index)) != 0
 }
 
-// This one is used for notes, because we want to offset them from the avatar 
+// This one is used for notes, because we want to offset them from the avatar
 // we also want to scale them down to a smaller size
 fn map_hash_to_coordinates_with_offset(hash: U256, origin_hash: U256) -> (f32, f32, f32) {
     // Calculate coordinates for the hash
@@ -664,17 +759,16 @@ fn map_hash_to_coordinates_with_offset(hash: U256, origin_hash: U256) -> (f32, f
     (x_f32, y_f32, z_f32)
 }
 
-// This function scales down the coordinates to a smaller usize 
+// This function scales down the coordinates to a smaller usize
 // so that we can fit them into a f32 and then scale them up to the desired
-// scene 
+// scene
 fn scale_down_coordinates_to_f32(x: U256, y: U256, z: U256) -> (f32, f32, f32) {
-    
     // Max value is 2^85
     let max_value = U256::from(1u128) << 85;
 
     // Extract sign and absolute value
-    // The sign is the 85th bit 
-    // I did this so I could get negative values as well 
+    // The sign is the 85th bit
+    // I did this so I could get negative values as well
     // and make the scene more interesting
     let x_sign = if x.bit(84) { -1.0 } else { 1.0 };
     let y_sign = if y.bit(84) { -1.0 } else { 1.0 };
@@ -706,7 +800,7 @@ fn u256_to_f32(value: U256, max_value: U256) -> f32 {
     // Convert U256 to f32 by first converting to a smaller integer (like u64) and then to f32
     // This is because U256 doesn't implement From<f32> for some reason
     //
-    // We divide by max_value / u64::MAX to get a value between 0 and 1 
+    // We divide by max_value / u64::MAX to get a value between 0 and 1
     // and then multiply by u64::MAX to get a value between 0 and u64::MAX
     let value_u64 = value / (max_value / U256::from(u64::MAX));
     // Once we have a value between 0 and u64::MAX, we can convert it to f32
