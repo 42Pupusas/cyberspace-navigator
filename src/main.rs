@@ -46,7 +46,6 @@ fn main() {
             DefaultPickingPlugins,
         ))
         .insert_resource(ClearColor(Color::BLACK)) // Set background color to black
-        .insert_resource(RelayCounter(0)) // Counter for the number of relays we've connected to
         .insert_resource(UniqueNotes::default()) // Set of unique notes we've received
         .insert_resource(UniqueAvatars::default()) // Set of unique avatars we've received
         // Events work as a way to pass data between systems
@@ -63,6 +62,7 @@ fn main() {
                 rendering_entity_system,
                 make_notes_children_of_avatar.run_if(on_event::<NostrBevyEvents>()),
                 handle_clicks_on_entities.run_if(on_event::<ClickedEntity>()),
+                handle_clicks_on_reactions.run_if(on_event::<ClickedEntity>()),
                 rotate_cyberspace_entities,
             ),
         )
@@ -179,19 +179,19 @@ fn rotate_cyberspace_entities(
 }
 
 #[derive(Event, Resource)]
-struct NostrBevyEvents(String);
+struct NostrBevyEvents(String, usize);
 
 #[derive(Event, Resource)]
 struct NoteBevyEvents(CyberspaceNote);
 
 // We use these receivers to hold the data that we receive from the websocket
 #[derive(Resource, Deref)]
-struct NostrReceiver(Receiver<String>);
+struct NostrReceiver(Receiver<(String, usize)>);
 
 #[derive(Resource, Deref)]
 struct NoteReceiver(Receiver<CyberspaceNote>);
 
-const RELAY_LIST: [&str; 10] = [
+const RELAY_LIST: [&str; 9] = [
     "wss://relay.arrakis.lat",
     "wss://nostr.wine",
     "wss://njump.me",
@@ -200,12 +200,11 @@ const RELAY_LIST: [&str; 10] = [
     "wss://relay.n057r.club",
     "wss://nostr.maximacitadel.org",
     "wss://relay.geekiam.services",
-    "wss://nostr.jc.es",
     "wss://relay.hodl.ar",
 ];
 
 fn cyberspace_websocket(mut commands: Commands, mut task_pool: AsyncTaskPool<()>) {
-    let (relay_tx, relay_rx) = bounded::<String>(100);
+    let (relay_tx, relay_rx) = bounded::<(String, usize)>(100);
     let (note_tx, note_rx) = bounded::<CyberspaceNote>(500);
 
     if task_pool.is_idle() {
@@ -224,21 +223,20 @@ fn cyberspace_websocket(mut commands: Commands, mut task_pool: AsyncTaskPool<()>
                     while let Some(Ok(msg)) = relay.read_from_relay().await {
                         match msg {
                             RelayEvents::EVENT(_, _, signed_note) => {
+                                if signed_note.get_kind() == 7 {
+                                }
                                 let note = CyberspaceNote::new(signed_note);
                                 let _ = note_tx.send(note);
+                                let _ = relay_tx.send((format!("{} - New Note", relay_url), 0));
                             }
                             RelayEvents::EOSE(_, _) => {
-                                if let Ok(_) = relay_tx.send(relay_url.to_string()){
-                                    info!("End of stream from relay: {}", relay_url.to_string());
-                                }
-                                
+                                let _ = relay_tx.send((format!("{} - EOSE", relay_url), 1));
                             }
                             _ => {}
                         }
                     }
                 } else {
-                    info!("Failed to connect to relay: {}", relay_url.to_string());
-                    let _ = relay_tx.send(relay_url.to_string());
+                    let _ = relay_tx.send((format!("{} - Failed", relay_url), 1));
                 }
             });
         }
@@ -260,17 +258,18 @@ impl Default for UniqueNotes {
 fn cyberspace_middleware(
     nostr_receiver: Res<NostrReceiver>,
     note_receiver: Res<NoteReceiver>,
-    mut counter: ResMut<RelayCounter>,
     mut nostr_writer: EventWriter<NostrBevyEvents>,
     mut note_writer: EventWriter<NoteBevyEvents>,
     mut unique_notes: ResMut<UniqueNotes>,
 ) {
     let note_set = unique_notes.as_mut();
 
-    nostr_receiver.try_iter().for_each(|relay_url| {
-        counter.0 += 1;
-        info!("Connection to relay was: {}", relay_url);
-        nostr_writer.send(NostrBevyEvents(relay_url));
+    nostr_receiver.try_iter().for_each(|(response, add)| {
+        if add != 0 {
+            info!("{}", response);
+        }
+        nostr_writer.send(NostrBevyEvents(response, add));
+
     });
 
     note_receiver.try_iter().for_each(|note| {
@@ -316,12 +315,14 @@ fn rendering_entity_system(
                 commands.spawn((
                     NoteBundle::new(&cyber_note.0, &mut materials, &mut meshes),
                     Kind1Note(cyber_note.0.clone()),
+                    EventId(cyber_note.0.id.clone()),
                 ));
             }
             7 => {
                 commands.spawn((
                     NoteBundle::new(&cyber_note.0, &mut materials, &mut meshes),
                     Kind7Note(cyber_note.0.clone()),
+                    TaggedEvent(cyber_note.0.tagged.clone()),
                 ));
             }
             _ => {}
@@ -329,21 +330,20 @@ fn rendering_entity_system(
     }
 }
 
-#[derive(Resource)]
-struct RelayCounter(usize);
+#[derive(Component)]
+struct EventId(String);
+
+#[derive(Component)]
+struct TaggedEvent(Option<String>);
+
+#[derive(Component)]
+struct Processed;
 
 fn make_notes_children_of_avatar(
     mut commands: Commands,
-    note_query: Query<(Entity, &NotePubkey, &Transform)>,
+    note_query: Query<(Entity, &NotePubkey, &Transform) , Without<Processed>>,
     avatar_query: Query<(Entity, &AvatarPubkey, &Transform)>,
-    counter: ResMut<RelayCounter>,
 ) {
-    info!("Counter: {}", counter.0);
-    if counter.0 < RELAY_LIST.len() {
-        return;
-    }
-
-    info!("Now");
 
     for (avatar_entity, avatar_pubkey, avatar_transform) in avatar_query.iter() {
         for (note_entity, _note, note_transform) in note_query
@@ -352,7 +352,6 @@ fn make_notes_children_of_avatar(
         {
             // Calculate the relative position of the note to the avatar
             let relative_position = note_transform.translation - avatar_transform.translation;
-
             // Set the note's new transform to this relative position
             let relative_transform = Transform::from_translation(relative_position);
 
@@ -360,10 +359,11 @@ fn make_notes_children_of_avatar(
             commands.entity(avatar_entity).add_child(note_entity);
 
             // Apply the relative transform
-            commands.entity(note_entity).insert(relative_transform);
+            commands.entity(note_entity).insert(relative_transform).insert(Processed);
         }
     }
 }
+
 
 #[derive(Component)]
 struct CyberspaceMarker {
@@ -519,6 +519,36 @@ fn handle_clicks_on_entities(
     }
 }
 
+fn handle_clicks_on_reactions(
+    mut events: EventReader<ClickedEntity>,
+    mut query: Query<(
+        &TaggedEvent,
+        &Kind7Note,
+    )>,
+    mut ids_query: Query<(
+        &EventId,
+        &Kind1Note,
+    )>,
+) {
+    for event in events.read() {
+        if let Ok((tagged_event, note)) = query.get_mut(event.0) {
+            match event.1.button {
+                PointerButton::Primary => {
+                    if let Some(tag) = &tagged_event.0 {
+                        info!("Tagged event: {}", tag);
+                        for (id, note) in ids_query.iter_mut() {
+                            if id.0 == tag.clone() {
+                                info!("Found the note: {}", note.0);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 #[derive(Component, Debug)]
 struct Kind1Note(CyberspaceNote);
 
@@ -610,6 +640,7 @@ struct CyberspaceNote {
     _signature: String,
     created_at: u64,
     pubkey: String,
+    tagged: Option<String>,
 }
 
 impl CyberspaceNote {
@@ -620,6 +651,12 @@ impl CyberspaceNote {
         let _signature = signed_note.get_sig().to_string();
         let created_at = signed_note.get_created_at();
         let pubkey = signed_note.get_pubkey().to_string();
+
+        let mut tagged = None;
+        if signed_note.get_tags_by_id("e").len() > 0 {
+            tagged = Some(signed_note.get_tags_by_id("e")[0].to_string());
+        }
+
         CyberspaceNote {
             content,
             kind,
@@ -627,6 +664,7 @@ impl CyberspaceNote {
             _signature,
             created_at,
             pubkey,
+            tagged,
         }
     }
 }
