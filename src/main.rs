@@ -1,10 +1,15 @@
-use bevy::{input::mouse::MouseMotion, prelude::*, window::PresentMode};
+use bevy::{
+    core_pipeline::clear_color::ClearColorConfig, ecs::system::Command, input::mouse::MouseMotion,
+    prelude::*, render::camera::Viewport, transform::commands, window::PresentMode,
+    winit::WinitSettings,
+};
 
 use bevy_mod_picking::{
     prelude::{Click, ListenerInput, On, Out, Over, Pointer, PointerButton},
     DefaultPickingPlugins,
 };
 
+use chrono::{DateTime, NaiveDateTime, Utc};
 use primitive_types::U256;
 use serde_json::json;
 
@@ -23,8 +28,8 @@ use nostro2::{
 use bevy_async_task::AsyncTaskPool;
 use crossbeam_channel::{bounded, Receiver};
 
-const WINDOW_WIDTH: f32 = 1280.0;
-const WINDOW_HEIGHT: f32 = 720.0;
+const WINDOW_WIDTH: f32 = 1400.0;
+const WINDOW_HEIGHT: f32 = 900.0;
 
 // Main function loop, runs once on startup
 fn main() {
@@ -45,15 +50,21 @@ fn main() {
             // Gives us clickin' and pickin' capabilities
             DefaultPickingPlugins,
         ))
+        .insert_resource(WinitSettings::desktop_app())
         .insert_resource(ClearColor(Color::BLACK)) // Set background color to black
         .insert_resource(UniqueNotes::default()) // Set of unique notes we've received
-        .insert_resource(UniqueAvatars::default()) // Set of unique avatars we've received
+        .insert_resource(UniqueAvatars::default()) // Set of unique avatars we've receive
+        .insert_resource(CyberHeadingFont(Some(Handle::default())))
+        .insert_resource(CyberHeadingText(Some(Handle::default())))
         // Events work as a way to pass data between systems
         .add_event::<NostrBevyEvents>()
         .add_event::<NoteBevyEvents>()
         .add_event::<ClickedEntity>()
         // Systems are functions that run every frame
-        .add_systems(Startup, (setup, cyberspace_websocket))
+        .add_systems(
+            Startup,
+            (setup, load_reasources, draw_ui, cyberspace_websocket),
+        )
         .add_systems(
             Update,
             (
@@ -71,15 +82,47 @@ fn main() {
 
 // We start the camera at a fixed position
 // far away to get a good view of the scene
-fn setup(mut commands: Commands) {
-    commands
-        .spawn(Camera3dBundle {
+fn setup(
+    mut commands: Commands,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    asset_server: Res<AssetServer>,
+) {
+    commands.spawn((
+        Camera3dBundle {
+            camera: Camera {
+                order: 1,
+                ..Default::default()
+            },
             transform: Transform::from_xyz(-2000.0, 2000.0, 2000.0)
                 .looking_at(Vec3::new(0.0, 0.0, 0.0), Vec3::Y),
             ..default()
-        })
-        .insert(CameraState::default());
+        },
+        CameraState::default(),
+    ));
+
+    // 2D Camera - For UI, with a higher order to be rendered on top
+    commands.spawn(Camera2dBundle {
+        camera: Camera {
+            order: 2, // Rendered after the 3D camera
+            viewport: Some(Viewport {
+                physical_size: UVec2::new(WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32),
+                physical_position: UVec2::ZERO,
+                depth: 0.0..1.0,
+            }),
+            ..default()
+        },
+        camera_2d: Camera2d {
+            // don't clear on the second camera because the first camera already cleared the window
+            clear_color: ClearColorConfig::None,
+            ..default()
+        },
+        ..default()
+    });
 }
+
+#[derive(Resource)]
+struct DisplayText(String);
 
 #[derive(Component, Copy, Clone)]
 struct CameraState {
@@ -213,18 +256,16 @@ fn cyberspace_websocket(mut commands: Commands, mut task_pool: AsyncTaskPool<()>
             let note_tx = note_tx.clone();
             task_pool.spawn(async move {
                 if let Ok(relay) = NostrRelay::new(relay_url).await {
-                    // let one_week_ago = nostro2::utils::get_unix_timestamp() - 604800;
-                    // let yesterday = nostro2::utils::get_unix_timestamp() - 86400;
-                    let last_hour = nostro2::utils::get_unix_timestamp() - 3600;
-                    let filter = json!({"kinds": [1, 7], "since": last_hour});
-                    // let metadata_filter = json!({"kinds": [7], "since": last_2_hours});
+                    // let timestamp = nostro2::utils::get_unix_timestamp() - 604800; // 1 week
+                    let timestamp = nostro2::utils::get_unix_timestamp() - 86400; // 1 day
+                    // let timestamp = nostro2::utils::get_unix_timestamp() - 3600; // 1 hour
+                    let filter = json!({"kinds": [1, 7], "since": timestamp});
                     let _ = relay.subscribe(filter).await;
                     // let _ = relay.subscribe(metadata_filter).await;
                     while let Some(Ok(msg)) = relay.read_from_relay().await {
                         match msg {
                             RelayEvents::EVENT(_, _, signed_note) => {
-                                if signed_note.get_kind() == 7 {
-                                }
+                                if signed_note.get_kind() == 7 {}
                                 let note = CyberspaceNote::new(signed_note);
                                 let _ = note_tx.send(note);
                                 let _ = relay_tx.send((format!("{} - New Note", relay_url), 0));
@@ -269,7 +310,6 @@ fn cyberspace_middleware(
             info!("{}", response);
         }
         nostr_writer.send(NostrBevyEvents(response, add));
-
     });
 
     note_receiver.try_iter().for_each(|note| {
@@ -341,10 +381,9 @@ struct Processed;
 
 fn make_notes_children_of_avatar(
     mut commands: Commands,
-    note_query: Query<(Entity, &NotePubkey, &Transform) , Without<Processed>>,
+    note_query: Query<(Entity, &NotePubkey, &Transform), Without<Processed>>,
     avatar_query: Query<(Entity, &AvatarPubkey, &Transform)>,
 ) {
-
     for (avatar_entity, avatar_pubkey, avatar_transform) in avatar_query.iter() {
         for (note_entity, _note, note_transform) in note_query
             .iter()
@@ -359,11 +398,13 @@ fn make_notes_children_of_avatar(
             commands.entity(avatar_entity).add_child(note_entity);
 
             // Apply the relative transform
-            commands.entity(note_entity).insert(relative_transform).insert(Processed);
+            commands
+                .entity(note_entity)
+                .insert(relative_transform)
+                .insert(Processed);
         }
     }
 }
-
 
 #[derive(Component)]
 struct CyberspaceMarker {
@@ -403,6 +444,140 @@ impl Default for AvatarMetadata {
             picture: "".to_string(),
         }
     }
+}
+
+#[derive(Component)]
+struct CyberTextDetails;
+
+#[derive(Component)]
+struct CyberTextHeader;
+
+const DARK_PURPLE: Color = Color::rgba(0.09, 0.09, 0.15, 0.21);
+const DARK_BLUE: Color = Color::rgba(0.13, 0.12, 0.25, 1.0);
+const LIGHT_CORAL: Color = Color::rgba(0.95, 0.60, 0.47, 1.0);
+const TERRACOTA: Color = Color::rgba(0.75, 0.38, 0.29, 1.0);
+const RASPBERRY: Color = Color::rgba(0.65, 0.16, 0.34, 1.0);
+
+#[derive(Resource)]
+struct CyberHeadingFont(Option<Handle<Font>>);
+
+#[derive(Resource)]
+struct CyberHeadingText(Option<Handle<Font>>);
+
+fn load_reasources(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let cyber_font = asset_server.load("fonts/cyberspace.ttf");
+    let cyber_text = asset_server.load("fonts/spacetext.ttf");
+
+    commands.insert_resource(CyberHeadingFont(Some(cyber_font)));
+    commands.insert_resource(CyberHeadingText(Some(cyber_text)));
+}
+
+fn draw_ui(mut commands: Commands, asset_server: Res<AssetServer>) {
+    let cyber_heading = asset_server.load("fonts/cyberspace.ttf");
+    let cyber_text = asset_server.load("fonts/spacetext.ttf");
+
+    let ui_top_left = commands
+        .spawn(NodeBundle {
+            style: Style {
+                position_type: PositionType::Absolute,
+                top: Val::Percent(4.2),
+                left: Val::Percent(4.2),
+                width: Val::Percent(21.0),
+                max_width: Val::Percent(21.0),
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
+                row_gap: Val::Px(16.8),
+                column_gap: Val::Px(16.8),
+                flex_wrap: FlexWrap::Wrap,
+                ..default()
+            },
+            background_color: Color::NONE.into(),
+            ..default()
+        })
+        .id();
+
+    let headerboard = commands
+        .spawn((NodeBundle {
+            style: Style {
+                width: Val::Auto,
+                height: Val::Auto,
+                margin: UiRect::all(Val::Px(8.4)),
+                padding: UiRect::all(Val::Px(8.4)),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                flex_wrap: FlexWrap::Wrap,
+                ..default()
+            },
+            background_color: DARK_PURPLE.into(),
+            ..default()
+        },))
+        .id();
+
+    let notice_text = commands
+        .spawn((
+            TextBundle::from_section(
+                "WELCOME TO CYBERSPACE".to_string(),
+                TextStyle {
+                    font_size: 42.0,
+                    font: cyber_heading.clone(),
+                    color: Color::WHITE,
+                    ..default()
+                },
+            )
+            .with_style(Style {
+                padding: UiRect::all(Val::Px(8.4)),
+                align_self: AlignSelf::Center,
+                justify_self: JustifySelf::Center,
+                ..default()
+            }),
+            CyberTextHeader,
+        ))
+        .id();
+
+    let details_board = commands
+        .spawn(
+            (NodeBundle {
+                style: Style {
+                    width: Val::Auto,
+                    height: Val::Auto,
+                    margin: UiRect::all(Val::Px(8.4)),
+                    padding: UiRect::all(Val::Px(8.4)),
+                    align_items: AlignItems::FlexStart,
+                    justify_content: JustifyContent::FlexStart,
+                    flex_wrap: FlexWrap::Wrap,
+                    ..default()
+                },
+                background_color: DARK_PURPLE.into(),
+                ..default()
+            }),
+        )
+        .id();
+
+    let details_text = commands
+        .spawn((TextBundle::from_section(
+            "Cyberspace is a place where you can explore the Nostr network in 3D.\n\nYou can move around using WASD and the mouse.\n\nYou can click on avatars and notes to see their content.\n\n".to_string(),
+            TextStyle {
+                font_size: 21.0,
+                font: cyber_text.clone(),
+                color: Color::WHITE,
+                ..default()
+            },
+        ), CyberTextDetails)) // Set the alignment of the TextBundle
+        .id();
+
+    commands
+        .entity(ui_top_left)
+        .push_children(&[headerboard, details_board]);
+
+    commands.entity(headerboard).push_children(&[notice_text]);
+
+    commands
+        .entity(details_board)
+        .push_children(&[details_text]);
 }
 
 #[derive(Bundle)]
@@ -448,6 +623,9 @@ impl AvatarBundle {
     }
 }
 
+#[derive(Component)]
+struct CyberspaceUI;
+
 impl Default for AvatarBundle {
     fn default() -> Self {
         AvatarBundle {
@@ -483,7 +661,12 @@ fn handle_clicks_on_entities(
         Option<&AvatarPubkey>,
         Option<&Kind1Note>,
     )>,
+    mut ui_header: Query<&mut Text, (With<CyberTextHeader>, Without<CyberTextDetails>)>,
+    mut ui_text: Query<&mut Text, (With<CyberTextDetails>, Without<CyberTextHeader>)>,
 ) {
+    let mut ui_text = ui_text.single_mut();
+    let mut ui_header = ui_header.single_mut();
+
     for event in events.read() {
         if let Ok((entity, mut marker, mut transform, avatar_pubkey, note)) = query.get_mut(event.0)
         {
@@ -508,9 +691,13 @@ fn handle_clicks_on_entities(
                 }
                 PointerButton::Primary => {
                     if let Some(avatar) = avatar_pubkey {
-                        info!("Avatar pubkey: {}", avatar.0);
+                        info!("Avatar says: {}", avatar.0);
+                        ui_header.sections[0].value = format!("Avatar Pubkey");
+                        ui_text.sections[0].value = format!("{}", avatar.0[..12].to_string());
                     } else if let Some(note) = note {
                         info!("Note says: {}", note.0);
+                        ui_header.sections[0].value = format!("CyberNote");
+                        ui_text.sections[0].value = format!("{}", note.0);
                     }
                 }
                 _ => {}
@@ -521,26 +708,37 @@ fn handle_clicks_on_entities(
 
 fn handle_clicks_on_reactions(
     mut events: EventReader<ClickedEntity>,
-    mut query: Query<(
-        &TaggedEvent,
-        &Kind7Note,
-    )>,
-    mut ids_query: Query<(
-        &EventId,
-        &Kind1Note,
-    )>,
+    mut query: Query<(&TaggedEvent, &Kind7Note)>,
+    mut ids_query: Query<(&EventId, &Kind1Note)>,
+    mut ui_header: Query<&mut Text, (With<CyberTextHeader>, Without<CyberTextDetails>)>,
+    mut ui_text: Query<&mut Text, (With<CyberTextDetails>, Without<CyberTextHeader>)>,
 ) {
+    let mut ui_text = ui_text.single_mut();
+    let mut ui_header = ui_header.single_mut();
     for event in events.read() {
         if let Ok((tagged_event, note)) = query.get_mut(event.0) {
             match event.1.button {
                 PointerButton::Primary => {
                     if let Some(tag) = &tagged_event.0 {
-                        info!("Tagged event: {}", tag);
                         for (id, note) in ids_query.iter_mut() {
                             if id.0 == tag.clone() {
                                 info!("Found the note: {}", note.0);
+                                ui_header.sections[0].value = format!("Reacted To:");
+                                if note.0.tagged.is_some() {
+                                    ui_text.sections[0].value = format!(
+                                        "{}",
+                                        note.0.tagged.clone().unwrap()[0..12].to_string()
+                                    );
+                                    ui_text.sections[0].value = format!("{}", note.0);
+                                } else {
+                                    ui_text.sections[0].value =
+                                        format!("Not found in this relay galaxy");
+                                }
                             }
                         }
+                    } else {
+                        ui_header.sections[0].value = format!("Reacted To:");
+                        ui_text.sections[0].value = format!("Not found in this relay galaxy");
                     }
                 }
                 _ => {}
@@ -671,10 +869,14 @@ impl CyberspaceNote {
 
 impl Display for CyberspaceNote {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let date_time =
+            chrono::NaiveDateTime::from_timestamp_opt(self.created_at as i64, 0).unwrap();
         write!(
             f,
-            "\n content: {},\nkind: {}, created_at: {},\npubkey: {},\nid: {}..,\nsignature: {:24}... \n",
-            self.content, self.kind, self.created_at, self.pubkey, self.id, self._signature
+            "{},\n\nTimestamp: {},\n\nID {}..,\n",
+            self.content,
+            date_time.format("%Y-%m-%d %H:%M:%S"),
+            self.id[..8].to_string(),
         )
     }
 }
@@ -688,21 +890,24 @@ fn simhash(input: &str) -> U256 {
     // Initialize a vector of 256 zeros
     let mut vectors: Vec<i32> = vec![0; 256];
 
-    // Initialize a hashmap to count the occurrences of each word
-    let mut word_count = HashMap::new();
+    // Initialize a hashmap to count the occurrences of each shingle
+    let mut shingle_count = HashMap::new();
 
-    // Split the input string into words and count their occurrences
-    for word in input.split_whitespace() {
-        *word_count.entry(word).or_insert(0) += 1;
+    // Convert input to a vector of characters
+    let chars: Vec<char> = input.chars().collect();
+
+    if chars.len() > 1 {
+        for i in 0..chars.len() - 1 {
+            let shingle = chars[i].to_string() + &chars[i + 1].to_string();
+            *shingle_count.entry(shingle).or_insert(0) += 1;
+        }
     }
-
-    // Hash each word and add/subtract from the vector
-    for (word, count) in word_count {
-        // Hash the word
-        let hash = hash_word(word);
+    // Hash each shingle and add/subtract from the vector
+    for (shingle, count) in shingle_count {
+        // Hash the shingle
+        let hash = hash_word(&shingle); // Assuming hash_word can hash a shingle
         for i in 0..256 {
             // Add or subtract from the vector based on the bit at index i
-            // If the bit is 1, add the count, otherwise subtract
             if get_bit(hash, i) {
                 vectors[i] += count;
             } else {
