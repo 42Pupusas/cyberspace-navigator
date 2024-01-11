@@ -1,7 +1,7 @@
 use bevy::{
     core_pipeline::clear_color::ClearColorConfig, ecs::system::Command, input::mouse::MouseMotion,
-    prelude::*, render::camera::Viewport, transform::commands, window::PresentMode,
-    winit::WinitSettings,
+    prelude::*, render::camera::Viewport, text::BreakLineOn, transform::commands,
+    window::PresentMode, winit::WinitSettings,
 };
 
 use bevy_mod_picking::{
@@ -54,17 +54,12 @@ fn main() {
         .insert_resource(ClearColor(Color::BLACK)) // Set background color to black
         .insert_resource(UniqueNotes::default()) // Set of unique notes we've received
         .insert_resource(UniqueAvatars::default()) // Set of unique avatars we've receive
-        .insert_resource(CyberHeadingFont(Some(Handle::default())))
-        .insert_resource(CyberHeadingText(Some(Handle::default())))
         // Events work as a way to pass data between systems
         .add_event::<NostrBevyEvents>()
         .add_event::<NoteBevyEvents>()
         .add_event::<ClickedEntity>()
         // Systems are functions that run every frame
-        .add_systems(
-            Startup,
-            (setup, load_reasources, draw_ui, cyberspace_websocket),
-        )
+        .add_systems(Startup, (setup, draw_ui, cyberspace_websocket))
         .add_systems(
             Update,
             (
@@ -257,8 +252,8 @@ fn cyberspace_websocket(mut commands: Commands, mut task_pool: AsyncTaskPool<()>
             task_pool.spawn(async move {
                 if let Ok(relay) = NostrRelay::new(relay_url).await {
                     // let timestamp = nostro2::utils::get_unix_timestamp() - 604800; // 1 week
-                    let timestamp = nostro2::utils::get_unix_timestamp() - 86400; // 1 day
-                    // let timestamp = nostro2::utils::get_unix_timestamp() - 3600; // 1 hour
+                    // let timestamp = nostro2::utils::get_unix_timestamp() - 86400; // 1 day
+                    let timestamp = nostro2::utils::get_unix_timestamp() - 3600; // 1 hour
                     let filter = json!({"kinds": [1, 7], "since": timestamp});
                     let _ = relay.subscribe(filter).await;
                     // let _ = relay.subscribe(metadata_filter).await;
@@ -452,33 +447,20 @@ struct CyberTextDetails;
 #[derive(Component)]
 struct CyberTextHeader;
 
-const DARK_PURPLE: Color = Color::rgba(0.09, 0.09, 0.15, 0.21);
-const DARK_BLUE: Color = Color::rgba(0.13, 0.12, 0.25, 1.0);
-const LIGHT_CORAL: Color = Color::rgba(0.95, 0.60, 0.47, 1.0);
-const TERRACOTA: Color = Color::rgba(0.75, 0.38, 0.29, 1.0);
-const RASPBERRY: Color = Color::rgba(0.65, 0.16, 0.34, 1.0);
+#[derive(Component)]
+struct LeftHelperText;
 
-#[derive(Resource)]
-struct CyberHeadingFont(Option<Handle<Font>>);
+#[derive(Component)]
+struct RightHelperText;
 
-#[derive(Resource)]
-struct CyberHeadingText(Option<Handle<Font>>);
-
-fn load_reasources(
-    mut commands: Commands,
-    asset_server: Res<AssetServer>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    let cyber_font = asset_server.load("fonts/cyberspace.ttf");
-    let cyber_text = asset_server.load("fonts/spacetext.ttf");
-
-    commands.insert_resource(CyberHeadingFont(Some(cyber_font)));
-    commands.insert_resource(CyberHeadingText(Some(cyber_text)));
-}
+const DARK_PURPLE: Color = Color::rgba(0.09, 0.09, 0.15, 0.42);
+const DARK_BLUE: Color = Color::rgba(0.13, 0.12, 0.25, 0.21);
+const LIGHT_CORAL: Color = Color::rgba(0.95, 0.60, 0.47, 0.21);
+const TERRACOTA: Color = Color::rgba(0.75, 0.38, 0.29, 0.21);
+const RASPBERRY: Color = Color::rgba(0.65, 0.16, 0.34, 0.21);
 
 fn draw_ui(mut commands: Commands, asset_server: Res<AssetServer>) {
-    let cyber_heading = asset_server.load("fonts/cyberspace.ttf");
-    let cyber_text = asset_server.load("fonts/spacetext.ttf");
+    let cyber_heading = asset_server.load("fonts/waifus.ttf");
 
     let ui_top_left = commands
         .spawn(NodeBundle {
@@ -486,10 +468,11 @@ fn draw_ui(mut commands: Commands, asset_server: Res<AssetServer>) {
                 position_type: PositionType::Absolute,
                 top: Val::Percent(4.2),
                 left: Val::Percent(4.2),
-                width: Val::Percent(21.0),
-                max_width: Val::Percent(21.0),
+                max_width: Val::Percent(42.0),
+                max_height: Val::Percent(42.0),
                 flex_direction: FlexDirection::Column,
-                align_items: AlignItems::Center,
+                align_items: AlignItems::FlexStart,
+                justify_content: JustifyContent::FlexStart,
                 row_gap: Val::Px(16.8),
                 column_gap: Val::Px(16.8),
                 flex_wrap: FlexWrap::Wrap,
@@ -498,23 +481,6 @@ fn draw_ui(mut commands: Commands, asset_server: Res<AssetServer>) {
             background_color: Color::NONE.into(),
             ..default()
         })
-        .id();
-
-    let headerboard = commands
-        .spawn((NodeBundle {
-            style: Style {
-                width: Val::Auto,
-                height: Val::Auto,
-                margin: UiRect::all(Val::Px(8.4)),
-                padding: UiRect::all(Val::Px(8.4)),
-                align_items: AlignItems::Center,
-                justify_content: JustifyContent::Center,
-                flex_wrap: FlexWrap::Wrap,
-                ..default()
-            },
-            background_color: DARK_PURPLE.into(),
-            ..default()
-        },))
         .id();
 
     let notice_text = commands
@@ -529,55 +495,109 @@ fn draw_ui(mut commands: Commands, asset_server: Res<AssetServer>) {
                 },
             )
             .with_style(Style {
+                margin: UiRect::all(Val::Px(8.4)),
                 padding: UiRect::all(Val::Px(8.4)),
-                align_self: AlignSelf::Center,
-                justify_self: JustifySelf::Center,
+                align_self: AlignSelf::FlexStart,
+                justify_self: JustifySelf::Start,
                 ..default()
-            }),
+            })
+            .with_background_color(DARK_PURPLE.into()),
             CyberTextHeader,
         ))
         .id();
 
-    let details_board = commands
-        .spawn(
-            (NodeBundle {
-                style: Style {
-                    width: Val::Auto,
-                    height: Val::Auto,
-                    margin: UiRect::all(Val::Px(8.4)),
-                    padding: UiRect::all(Val::Px(8.4)),
-                    align_items: AlignItems::FlexStart,
-                    justify_content: JustifyContent::FlexStart,
-                    flex_wrap: FlexWrap::Wrap,
-                    ..default()
-                },
-                background_color: DARK_PURPLE.into(),
-                ..default()
-            }),
-        )
-        .id();
-
-    let details_text = commands
+    let main_text = commands
         .spawn((TextBundle::from_section(
             "Cyberspace is a place where you can explore the Nostr network in 3D.\n\nYou can move around using WASD and the mouse.\n\nYou can click on avatars and notes to see their content.\n\n".to_string(),
             TextStyle {
                 font_size: 21.0,
-                font: cyber_text.clone(),
+                font: cyber_heading.clone(),
                 color: Color::WHITE,
                 ..default()
             },
-        ), CyberTextDetails)) // Set the alignment of the TextBundle
+        ).with_style(
+            Style {
+                margin: UiRect::all(Val::Px(8.4)),
+                padding: UiRect::all(Val::Px(8.4)),
+                flex_wrap: FlexWrap::Wrap,
+                ..default()
+            }
+        ).with_background_color(DARK_BLUE.into()), CyberTextDetails)) // Set the alignment of the TextBundle
+        .id();
+
+    let helper_board = commands
+        .spawn(NodeBundle {
+            style: Style {
+                display: bevy::ui::Display::Flex,
+                flex_direction: FlexDirection::Row,
+                column_gap: Val::Px(8.4),
+                height: Val::Auto,
+                ..default()
+            },
+            background_color: Color::NONE.into(),
+            ..default()
+        })
+        .id();
+
+    let empty_left_text = commands
+        .spawn((
+            TextBundle::from_section(
+                "".to_string(),
+                TextStyle {
+                    font_size: 21.0,
+                    font: cyber_heading.clone(),
+                    color: Color::WHITE,
+                    ..default()
+                },
+            )
+            .with_style(Style {
+                width: Val::Percent(65.0),
+                height: Val::Auto,
+                display: bevy::ui::Display::Flex,
+                flex_shrink: 1.0,
+                margin: UiRect::all(Val::Px(8.4)),
+                padding: UiRect::all(Val::Px(8.4)),
+                flex_wrap: FlexWrap::Wrap,
+                ..default()
+            })
+            .with_background_color(Color::NONE.into()),
+            LeftHelperText,
+        ))
+        .id();
+
+    let empty_right_text = commands
+        .spawn((
+            TextBundle::from_section(
+                "".to_string(),
+                TextStyle {
+                    font_size: 21.0,
+                    font: cyber_heading.clone(),
+                    color: Color::WHITE,
+                    ..default()
+                },
+            )
+            .with_style(Style {
+                margin: UiRect::all(Val::Px(8.4)),
+                padding: UiRect::all(Val::Px(8.4)),
+                display: bevy::ui::Display::Flex,
+                flex_shrink: 1.0,
+                width: Val::Percent(25.0),
+                height: Val::Auto,
+                flex_wrap: FlexWrap::Wrap,
+                ..default()
+            })
+            .with_background_color(Color::NONE.into()),
+            RightHelperText,
+        ))
         .id();
 
     commands
         .entity(ui_top_left)
-        .push_children(&[headerboard, details_board]);
-
-    commands.entity(headerboard).push_children(&[notice_text]);
+        .push_children(&[notice_text, main_text, helper_board]);
 
     commands
-        .entity(details_board)
-        .push_children(&[details_text]);
+        .entity(helper_board)
+        .push_children(&[empty_left_text, empty_right_text]);
 }
 
 #[derive(Bundle)]
@@ -610,7 +630,7 @@ impl AvatarBundle {
                 ),
                 // add birght blue material
                 material: materials.add(StandardMaterial {
-                    base_color: Color::rgba(1.0, 0.87451, 0.0, 1.0),
+                    base_color: TERRACOTA.into(),
                     unlit: true,
                     ..default()
                 }),
@@ -661,11 +681,47 @@ fn handle_clicks_on_entities(
         Option<&AvatarPubkey>,
         Option<&Kind1Note>,
     )>,
-    mut ui_header: Query<&mut Text, (With<CyberTextHeader>, Without<CyberTextDetails>)>,
-    mut ui_text: Query<&mut Text, (With<CyberTextDetails>, Without<CyberTextHeader>)>,
+    mut ui_header: Query<
+        &mut Text,
+        (
+            With<CyberTextHeader>,
+            Without<CyberTextDetails>,
+            Without<LeftHelperText>,
+            Without<RightHelperText>,
+        ),
+    >,
+    mut ui_text: Query<
+        &mut Text,
+        (
+            With<CyberTextDetails>,
+            Without<CyberTextHeader>,
+            Without<LeftHelperText>,
+            Without<RightHelperText>,
+        ),
+    >,
+    mut ui_left: Query<
+        (&mut Text, &mut BackgroundColor),
+        (
+            With<LeftHelperText>,
+            Without<CyberTextHeader>,
+            Without<CyberTextDetails>,
+            Without<RightHelperText>,
+        ),
+    >,
+    mut ui_right: Query<
+        (&mut Text, &mut BackgroundColor),
+        (
+            With<RightHelperText>,
+            Without<CyberTextHeader>,
+            Without<CyberTextDetails>,
+            Without<LeftHelperText>,
+        ),
+    >,
 ) {
     let mut ui_text = ui_text.single_mut();
     let mut ui_header = ui_header.single_mut();
+    let (mut ui_left, mut ui_left_bg) = ui_left.single_mut();
+    let (mut ui_right, mut ui_right_bg) = ui_right.single_mut();
 
     for event in events.read() {
         if let Ok((entity, mut marker, mut transform, avatar_pubkey, note)) = query.get_mut(event.0)
@@ -691,13 +747,33 @@ fn handle_clicks_on_entities(
                 }
                 PointerButton::Primary => {
                     if let Some(avatar) = avatar_pubkey {
-                        info!("Avatar says: {}", avatar.0);
-                        ui_header.sections[0].value = format!("Avatar Pubkey");
-                        ui_text.sections[0].value = format!("{}", avatar.0[..12].to_string());
+                        ui_header.sections[0].value = format!("AVATAR");
+                        ui_text.linebreak_behavior = BreakLineOn::AnyCharacter;
+                        ui_text.sections[0].value = format!("{}", avatar.0);
+                        ui_left.sections[0].value = format!("");
+                        ui_left_bg.0 = Color::NONE.into();
+                        ui_right.sections[0].value = format!("");
+                        ui_right_bg.0 = Color::NONE.into();
                     } else if let Some(note) = note {
-                        info!("Note says: {}", note.0);
-                        ui_header.sections[0].value = format!("CyberNote");
-                        ui_text.sections[0].value = format!("{}", note.0);
+                        let date_time =
+                            chrono::NaiveDateTime::from_timestamp_opt(note.0.created_at as i64, 0)
+                                .unwrap();
+                        let options = Options::new(42)
+                            .word_separator(WordSeparator::UnicodeBreakProperties)
+                            .break_words(true);
+
+                        let wrapped_content = wrap(&note.0.content, options);
+
+                        ui_header.sections[0].value = format!("NOTE");
+                        ui_text.linebreak_behavior = BreakLineOn::AnyCharacter;
+                        ui_text.sections[0].value = format!("{}", wrapped_content.join("\n"));
+                        ui_left.linebreak_behavior = BreakLineOn::AnyCharacter;
+                        ui_left.sections[0].value =
+                            format!("{}", date_time.format("%Y-%m-%d %H:%M:%S"));
+                        ui_left_bg.0 = RASPBERRY.into();
+                        ui_right.linebreak_behavior = BreakLineOn::AnyCharacter;
+                        ui_right.sections[0].value = format!("{}", note.0.id[..12].to_string());
+                        ui_right_bg.0 = DARK_BLUE.into();
                     }
                 }
                 _ => {}
@@ -710,30 +786,80 @@ fn handle_clicks_on_reactions(
     mut events: EventReader<ClickedEntity>,
     mut query: Query<(&TaggedEvent, &Kind7Note)>,
     mut ids_query: Query<(&EventId, &Kind1Note)>,
-    mut ui_header: Query<&mut Text, (With<CyberTextHeader>, Without<CyberTextDetails>)>,
-    mut ui_text: Query<&mut Text, (With<CyberTextDetails>, Without<CyberTextHeader>)>,
+    mut ui_header: Query<
+        &mut Text,
+        (
+            With<CyberTextHeader>,
+            Without<CyberTextDetails>,
+            Without<LeftHelperText>,
+            Without<RightHelperText>,
+        ),
+    >,
+    mut ui_text: Query<
+        &mut Text,
+        (
+            With<CyberTextDetails>,
+            Without<CyberTextHeader>,
+            Without<LeftHelperText>,
+            Without<RightHelperText>,
+        ),
+    >,
+    mut ui_left: Query<
+        (&mut Text, &mut BackgroundColor),
+        (
+            With<LeftHelperText>,
+            Without<CyberTextHeader>,
+            Without<CyberTextDetails>,
+            Without<RightHelperText>,
+        ),
+    >,
+    mut ui_right: Query<
+        (&mut Text, &mut BackgroundColor),
+        (
+            With<RightHelperText>,
+            Without<CyberTextHeader>,
+            Without<CyberTextDetails>,
+            Without<LeftHelperText>,
+        ),
+    >,
 ) {
     let mut ui_text = ui_text.single_mut();
     let mut ui_header = ui_header.single_mut();
+    let (mut ui_left, mut ui_left_bg) = ui_left.single_mut();
+    let (mut ui_right, mut ui_right_bg) = ui_right.single_mut();
+
     for event in events.read() {
-        if let Ok((tagged_event, note)) = query.get_mut(event.0) {
+        if let Ok((tagged_event, _)) = query.get_mut(event.0) {
             match event.1.button {
                 PointerButton::Primary => {
                     if let Some(tag) = &tagged_event.0 {
                         for (id, note) in ids_query.iter_mut() {
                             if id.0 == tag.clone() {
                                 info!("Found the note: {}", note.0);
-                                ui_header.sections[0].value = format!("Reacted To:");
-                                if note.0.tagged.is_some() {
-                                    ui_text.sections[0].value = format!(
-                                        "{}",
-                                        note.0.tagged.clone().unwrap()[0..12].to_string()
-                                    );
-                                    ui_text.sections[0].value = format!("{}", note.0);
-                                } else {
-                                    ui_text.sections[0].value =
-                                        format!("Not found in this relay galaxy");
-                                }
+                                ui_header.sections[0].value = format!("REACTION");
+                                ui_text.linebreak_behavior = BreakLineOn::AnyCharacter;
+                                let options = Options::new(42)
+                                    .word_separator(WordSeparator::UnicodeBreakProperties)
+                                    .break_words(true);
+
+                                let wrapped_content = wrap(&note.0.content, options);
+
+                                ui_text.sections[0].value = format!("{}", wrapped_content.join("\n"));
+                                ui_left.linebreak_behavior = BreakLineOn::AnyCharacter;
+                                ui_left.sections[0].value = format!(
+                                    "{}",
+                                    chrono::NaiveDateTime::from_timestamp_opt(
+                                        note.0.created_at as i64,
+                                        0
+                                    )
+                                    .unwrap()
+                                    .format("%Y-%m-%d %H:%M:%S")
+                                );
+                                ui_left_bg.0 = RASPBERRY.into();
+                                ui_right.linebreak_behavior = BreakLineOn::AnyCharacter;
+                                ui_right.sections[0].value =
+                                    format!("{}", note.0.id[..12].to_string());
+                                ui_right_bg.0 = DARK_BLUE.into();
                             }
                         }
                     } else {
@@ -789,7 +915,7 @@ impl NoteBundle {
                 hash = simhash(&note.content);
                 origin_hash = simhash(&note.pubkey);
                 (x, y, z) = map_hash_to_coordinates_with_offset(hash, origin_hash);
-                color = Color::rgba(0.0, 1.0, 0.58824, 1.0);
+                color = RASPBERRY.into();
                 radius = 2.1;
             }
             7 => {
@@ -797,7 +923,7 @@ impl NoteBundle {
                 hash = simhash(&concat_str);
                 origin_hash = simhash(&note.pubkey);
                 (x, y, z) = map_hash_to_coordinates_with_offset(hash, origin_hash);
-                color = Color::rgba(1.0, 0.41176, 0.70588, 1.0);
+                color = DARK_PURPLE.into();
                 radius = 1.05;
             }
             _ => {
@@ -867,14 +993,22 @@ impl CyberspaceNote {
     }
 }
 
+use textwrap::{wrap, Options, WordSeparator};
+
 impl Display for CyberspaceNote {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let date_time =
             chrono::NaiveDateTime::from_timestamp_opt(self.created_at as i64, 0).unwrap();
+        let options = Options::new(420)
+            .word_separator(WordSeparator::AsciiSpace)
+            .break_words(true);
+
+        let wrapped_content = wrap(&self.content, options);
+
         write!(
             f,
             "{},\n\nTimestamp: {},\n\nID {}..,\n",
-            self.content,
+            wrapped_content.join("\n"),
             date_time.format("%Y-%m-%d %H:%M:%S"),
             self.id[..8].to_string(),
         )

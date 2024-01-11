@@ -18,5 +18,6 @@ nostro2 = "0.1.10"
 primitive-types = "0.12.2"
 serde = "1.0.194"
 serde_json = "1.0.110"
+textwrap = "0.16.0"
 tokio = { version = "1.35.1", features = ["rt"] }
 
