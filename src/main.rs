@@ -1,7 +1,6 @@
 use bevy::{
-    core_pipeline::clear_color::ClearColorConfig, ecs::system::Command, input::mouse::MouseMotion,
-    prelude::*, render::camera::Viewport, text::BreakLineOn, transform::commands,
-    window::PresentMode, winit::WinitSettings,
+    core_pipeline::clear_color::ClearColorConfig, input::mouse::MouseMotion, prelude::*,
+    text::BreakLineOn, window::PresentMode,
 };
 
 use bevy_mod_picking::{
@@ -9,9 +8,8 @@ use bevy_mod_picking::{
     DefaultPickingPlugins,
 };
 
-use chrono::{DateTime, NaiveDateTime, Utc};
+use nostr_sdk::{Client, Filter, Kind, RelayPoolNotification};
 use primitive_types::U256;
-use serde_json::json;
 
 use cryptoxide::digest::Digest;
 use cryptoxide::sha2::Sha256;
@@ -20,16 +18,13 @@ use std::{
     fmt::{Display, Formatter},
 };
 
-use nostro2::{
-    notes::SignedNote,
-    relays::{NostrRelay, RelayEvents},
-};
+//use nostro2::{
+//    notes::SignedNote,
+//    relays::{NostrRelay, RelayEvents},
+//};
 
-use bevy_async_task::AsyncTaskPool;
+use bevy_async_task::AsyncTaskRunner;
 use crossbeam_channel::{bounded, Receiver};
-
-const WINDOW_WIDTH: f32 = 1400.0;
-const WINDOW_HEIGHT: f32 = 900.0;
 
 // Main function loop, runs once on startup
 fn main() {
@@ -38,9 +33,9 @@ fn main() {
             DefaultPlugins.set(WindowPlugin {
                 primary_window: Some(Window {
                     title: "Cyberspace Navigator".into(),
-                    resolution: (WINDOW_WIDTH, WINDOW_HEIGHT).into(),
                     present_mode: PresentMode::AutoVsync,
                     prevent_default_event_handling: true,
+                    canvas: Some("#cyberspace-canvas".into()),
                     resizable: true,
                     fit_canvas_to_parent: true,
                     ..default()
@@ -50,7 +45,6 @@ fn main() {
             // Gives us clickin' and pickin' capabilities
             DefaultPickingPlugins,
         ))
-        .insert_resource(WinitSettings::desktop_app())
         .insert_resource(ClearColor(Color::BLACK)) // Set background color to black
         .insert_resource(UniqueNotes::default()) // Set of unique notes we've received
         .insert_resource(UniqueAvatars::default()) // Set of unique avatars we've receive
@@ -79,9 +73,6 @@ fn main() {
 // far away to get a good view of the scene
 fn setup(
     mut commands: Commands,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    asset_server: Res<AssetServer>,
 ) {
     commands.spawn((
         Camera3dBundle {
@@ -100,11 +91,6 @@ fn setup(
     commands.spawn(Camera2dBundle {
         camera: Camera {
             order: 2, // Rendered after the 3D camera
-            viewport: Some(Viewport {
-                physical_size: UVec2::new(WINDOW_WIDTH as u32, WINDOW_HEIGHT as u32),
-                physical_position: UVec2::ZERO,
-                depth: 0.0..1.0,
-            }),
             ..default()
         },
         camera_2d: Camera2d {
@@ -241,42 +227,58 @@ const RELAY_LIST: [&str; 9] = [
     "wss://relay.hodl.ar",
 ];
 
-fn cyberspace_websocket(mut commands: Commands, mut task_pool: AsyncTaskPool<()>) {
+fn cyberspace_websocket(mut commands: Commands, mut task_executor: AsyncTaskRunner<()>) {
     let (relay_tx, relay_rx) = bounded::<(String, usize)>(100);
     let (note_tx, note_rx) = bounded::<CyberspaceNote>(500);
 
-    if task_pool.is_idle() {
-        for relay_url in RELAY_LIST.iter() {
-            let relay_tx = relay_tx.clone();
-            let note_tx = note_tx.clone();
-            task_pool.spawn(async move {
-                if let Ok(relay) = NostrRelay::new(relay_url).await {
-                    // let timestamp = nostro2::utils::get_unix_timestamp() - 604800; // 1 week
-                    // let timestamp = nostro2::utils::get_unix_timestamp() - 86400; // 1 day
-                    let timestamp = nostro2::utils::get_unix_timestamp() - 3600; // 1 hour
-                    let filter = json!({"kinds": [1, 7], "since": timestamp});
-                    let _ = relay.subscribe(filter).await;
-                    // let _ = relay.subscribe(metadata_filter).await;
-                    while let Some(Ok(msg)) = relay.read_from_relay().await {
-                        match msg {
-                            RelayEvents::EVENT(_, _, signed_note) => {
-                                if signed_note.get_kind() == 7 {}
-                                let note = CyberspaceNote::new(signed_note);
-                                let _ = note_tx.send(note);
-                                let _ = relay_tx.send((format!("{} - New Note", relay_url), 0));
-                            }
-                            RelayEvents::EOSE(_, _) => {
-                                let _ = relay_tx.send((format!("{} - EOSE", relay_url), 1));
-                            }
-                            _ => {}
-                        }
-                    }
-                } else {
-                    let _ = relay_tx.send((format!("{} - Failed", relay_url), 1));
-                }
-            });
+    task_executor.start(async move {
+        let nostr_client = Client::default();
+        for relay in RELAY_LIST {
+            if let Err(e) = nostr_client.add_relay(relay).await {
+                error!("Error adding relay: {}", e);
+            }
         }
-    }
+
+        nostr_client.connect().await;
+
+        let kinds_iter = vec![Kind::TextNote, Kind::Reaction].into_iter();
+        let filter = Filter::new().kinds(kinds_iter).limit(1000);
+        nostr_client.subscribe(vec![filter]).await;
+
+        while let Ok(msg) = nostr_client.notifications().recv().await {
+            match msg {
+                RelayPoolNotification::Event {
+                    relay_url: _,
+                    event,
+                } => {
+                    let cyber_note = CyberspaceNote::new(event);
+                    let _ = note_tx.send(cyber_note).unwrap();
+                }
+                RelayPoolNotification::Message {
+                    relay_url: _,
+                    message,
+                } => match message {
+                    nostr_sdk::RelayMessage::EndOfStoredEvents(_) => {
+                        info!("End of stored events");
+                        let _ = relay_tx.send((format!("{:?}", message), 1)).unwrap();
+                    }
+                    _ => {}
+                },
+                RelayPoolNotification::RelayStatus {
+                    relay_url: _,
+                    status,
+                } => {
+                    info!("RelayStatus: {:?}", status);
+                }
+                RelayPoolNotification::Stop => {
+                    info!("Stopping relay pool");
+                }
+                RelayPoolNotification::Shutdown => {
+                    info!("Shutting down relay pool");
+                }
+            }
+        }
+    });
 
     commands.insert_resource(NostrReceiver(relay_rx));
     commands.insert_resource(NoteReceiver(note_rx));
@@ -508,7 +510,7 @@ fn draw_ui(mut commands: Commands, asset_server: Res<AssetServer>) {
 
     let main_text = commands
         .spawn((TextBundle::from_section(
-            "Cyberspace is a place where you can explore the Nostr network in 3D.\n\nYou can move around using WASD and the mouse.\n\nYou can click on avatars and notes to see their content.\n\n".to_string(),
+            "Cyberspace is a place where you can explore the Nostr network in 3D.\n\nYou can move around using WASD and the mouse.\n\nHold right click to move the camera, and hold space to accelerate.\n\nYou can click on avatars and notes to see their content.\n\n".to_string(),
             TextStyle {
                 font_size: 21.0,
                 font: cyber_heading.clone(),
@@ -755,9 +757,6 @@ fn handle_clicks_on_entities(
                         ui_right.sections[0].value = format!("");
                         ui_right_bg.0 = Color::NONE.into();
                     } else if let Some(note) = note {
-                        let date_time =
-                            chrono::NaiveDateTime::from_timestamp_opt(note.0.created_at as i64, 0)
-                                .unwrap();
                         let options = Options::new(42)
                             .word_separator(WordSeparator::UnicodeBreakProperties)
                             .break_words(true);
@@ -768,8 +767,7 @@ fn handle_clicks_on_entities(
                         ui_text.linebreak_behavior = BreakLineOn::AnyCharacter;
                         ui_text.sections[0].value = format!("{}", wrapped_content.join("\n"));
                         ui_left.linebreak_behavior = BreakLineOn::AnyCharacter;
-                        ui_left.sections[0].value =
-                            format!("{}", date_time.format("%Y-%m-%d %H:%M:%S"));
+                        ui_left.sections[0].value = format!("{}", note.0.created_at);
                         ui_left_bg.0 = RASPBERRY.into();
                         ui_right.linebreak_behavior = BreakLineOn::AnyCharacter;
                         ui_right.sections[0].value = format!("{}", note.0.id[..12].to_string());
@@ -844,17 +842,10 @@ fn handle_clicks_on_reactions(
 
                                 let wrapped_content = wrap(&note.0.content, options);
 
-                                ui_text.sections[0].value = format!("{}", wrapped_content.join("\n"));
+                                ui_text.sections[0].value =
+                                    format!("{}", wrapped_content.join("\n"));
                                 ui_left.linebreak_behavior = BreakLineOn::AnyCharacter;
-                                ui_left.sections[0].value = format!(
-                                    "{}",
-                                    chrono::NaiveDateTime::from_timestamp_opt(
-                                        note.0.created_at as i64,
-                                        0
-                                    )
-                                    .unwrap()
-                                    .format("%Y-%m-%d %H:%M:%S")
-                                );
+                                ui_left.sections[0].value = format!("{}", note.0.created_at,);
                                 ui_left_bg.0 = RASPBERRY.into();
                                 ui_right.linebreak_behavior = BreakLineOn::AnyCharacter;
                                 ui_right.sections[0].value =
@@ -961,31 +952,24 @@ struct CyberspaceNote {
     content: String,
     kind: u32,
     id: String,
-    _signature: String,
-    created_at: u64,
+    created_at: String,
     pubkey: String,
     tagged: Option<String>,
 }
 
 impl CyberspaceNote {
-    pub fn new(signed_note: SignedNote) -> CyberspaceNote {
-        let content = signed_note.get_content().to_string();
-        let kind = signed_note.get_kind();
-        let id = signed_note.get_id().to_string();
-        let _signature = signed_note.get_sig().to_string();
-        let created_at = signed_note.get_created_at();
-        let pubkey = signed_note.get_pubkey().to_string();
-
-        let mut tagged = None;
-        if signed_note.get_tags_by_id("e").len() > 0 {
-            tagged = Some(signed_note.get_tags_by_id("e")[0].to_string());
-        }
+    pub fn new(signed_note: nostr_sdk::Event) -> CyberspaceNote {
+        let content = signed_note.content.clone();
+        let kind = signed_note.kind.as_u32();
+        let id = signed_note.id.to_hex();
+        let created_at = signed_note.created_at.to_human_datetime();
+        let pubkey = signed_note.pubkey.to_string();
+        let tagged = signed_note.event_ids().map(|id| id.to_hex()).next();
 
         CyberspaceNote {
             content,
             kind,
             id,
-            _signature,
             created_at,
             pubkey,
             tagged,
@@ -997,8 +981,6 @@ use textwrap::{wrap, Options, WordSeparator};
 
 impl Display for CyberspaceNote {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let date_time =
-            chrono::NaiveDateTime::from_timestamp_opt(self.created_at as i64, 0).unwrap();
         let options = Options::new(420)
             .word_separator(WordSeparator::AsciiSpace)
             .break_words(true);
@@ -1009,7 +991,7 @@ impl Display for CyberspaceNote {
             f,
             "{},\n\nTimestamp: {},\n\nID {}..,\n",
             wrapped_content.join("\n"),
-            date_time.format("%Y-%m-%d %H:%M:%S"),
+            self.created_at,
             self.id[..8].to_string(),
         )
     }
